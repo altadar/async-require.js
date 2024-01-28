@@ -79,10 +79,11 @@
     var pathnames = base.split('/')
     var host = (protocol != null && protocol.length > 0) ? pathnames.shift() : null
     
-    pathnames = pathnames.join('/').replace(/\/+/g, '/').split('/')
+    pathnames = pathnames.join('/').replace(/\/+/g, '/').replace(/\/$/, '').split('/')
     
     for(var i = 1; i < arguments.length; i++) {
-      var concat = { url: arguments[i], pathnames: Url.findPathnames(arguments[i], false) }
+      var concatUrl = arguments[i].replace(/\/+$/, '')
+      var concat = { url: concatUrl, pathnames: Url.findPathnames(concatUrl, false) }
       if(Url.findProtocol(concat.url) != null) {
         pathnames = concat.pathnames
         host = pathnames.shift()
@@ -95,9 +96,8 @@
           var pathname = concat.pathnames[j]
           if(pathname == '..') {
             pathnames.pop()
-          } else if(pathname == '.' && concat.pathnames.length > j + 1) {
-            pathnames.pop()
-            pathnames.push(concat.pathnames[++j])
+          } else if(pathname == '.') {
+            continue
           } else if(pathname.length > 0) {
             pathnames.push(pathname)
           }
@@ -107,7 +107,6 @@
     if(host != null && host[host.length - 1] != '/' && pathnames.length > 0) {
       host = host + '/'
     }
-    console.log({ protocol, host, pathnames, concat: Array.prototype.slice.call(arguments, 1) })
     
     return (protocol != null ? protocol : '') + (host != null ? host : '') + pathnames.join('/').replace(/\/+/g, '/')
   }
@@ -183,7 +182,7 @@
    * @global
    * @param {string} key - The key/url that are used as key in cache
    * @param {string} code - The javascript code to load
-   * @returns {(Promise<function>|Promise<JSON>)} The required/imported module
+   * @returns {Promise<function>} The required/imported module
    */
   this.load = function load(key, code) {
     return eval(
@@ -192,7 +191,7 @@
       '  var exports = module.exports\n' +
       '  return (async function(require, ARJS) {\n' +
       code +
-      '  })(ARJS.require, undefined)\n' +
+      '  })(ARJS.require.withPath(ARJS.Url.concat(\'' + key + '\', \'..\')), undefined)\n' +
       '  .then(function() { return module })\n' +
       '  .catch(function(error) {\n' +
       '    error.stack = error.stack.split(\'\\n\')\n' +
@@ -202,7 +201,13 @@
       '    error.stack = error.stack.join(\'\\n\')\n' +
       '    throw error\n' +
       '  })\n' +
-      '})(this)'
+      '})(\n' +
+      '  (typeof window != \'undefined\' && window) ||\n' +
+      '  (typeof self != \'undefined\' && self) ||\n' +
+      '  (typeof global != \'undefined\' && global) ||\n' +
+      '  (typeof globalThis != \'undefined\' && globalThis) ||\n' +
+      '  {}\n' +
+      ')'
     )
     .then(function(module) {
       cache[key] = module.exports
@@ -210,9 +215,13 @@
     })
   }
   
-  function fixURL(url) {
+  window.fixURL = function fixURL(url, dontAddBase) {
     if(url[0] == '.' || url[0] == '/' || url.indexOf('..') == 0) {
-      return Url.concat.apply(Url, config.baseURL.concat(url))
+      if(dontAddBase) {
+        return url
+      } else {
+        return Url.concat.apply(Url, config.baseURL.concat('..', url))
+      }
     } else if(url[0] == ':') {
       return url.slice(1)
     } else if(url.indexOf('cache:') == 0) {
@@ -220,14 +229,16 @@
       if(url.length == 0) {
         return url
       } else {
-        return fixURL(url)
+        return fixURL(url, dontAddBase)
       }
     } else if(url.indexOf('ar:') == 0) {
       return url
     } else if(url.indexOf('text:') == 0) {
-      return fixURL(url.slice(5))
+      return fixURL(url.slice(5), dontAddBase)
     } else {
-      if (Array.isArray(config.cdnURL) && config.cdnURL.length > 0) {
+      if(dontAddBase) {
+        return url
+      } else if(Array.isArray(config.cdnURL) && config.cdnURL.length > 0) {
         return Url.concat.apply(Url, config.cdnURL.concat(url))
       } else {
         return null
@@ -247,18 +258,18 @@
   this.require = function require(url) {
     var $url = url
     url = fixURL(url)
-    if($url == 'cache:') {
+    if ($url == 'cache:') {
       return Promise.resolve(cache)
-    } else if($url.indexOf('text:') == 0) {
+    } else if ($url.indexOf('text:') == 0) {
       return fetch(url).then(function(res) {
         return res.text()
       })
-    } else if(url == null) {
+    } else if (url == null) {
       throw new Error('Can\' require library/package `' + $url + '`, reason: no cdn has been set')
     }
-    if(url in cache) {
+    if (url in cache) {
       return Promise.resolve(cache[url])
-    } else if($url[0] != ':') {
+    } else if ($url[0] != ':') {
       return self.requireURL(url)
     } else {
       throw new Error('Can\'t find module ' + url)
@@ -268,6 +279,23 @@
   this.require.setAlias = function setAlias(alias, url) {
     cache[alias] = cache[fixURL(url)]
     return this
+  }
+  this.require.withPath = function withPath(path) {
+    var $require = this
+    function require(url) {
+      if(url[0] == '.' || url[0] == '/' || url[0] == ':' || url.indexOf('..') == 0 || url.indexOf('cache:') == 0 || url.indexOf('text:') == 0 || url.indexOf('ar:') == 0) {
+        return $require(Url.concat(path, fixURL(url, true)))
+      } else {
+        return $require(url)
+      }
+    }
+    require.arjs = true
+    require.setAlias = function setAlias(alias, url) {
+      $require.setAlias(alias, url)
+      return require
+    }
+    
+    return require
   }
   
   /**
